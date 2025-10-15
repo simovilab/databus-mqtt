@@ -1,2 +1,2 @@
-[rabbitmq_mqtt].
-[rabbitmq_management].
+[rabbitmq_management, rabbitmq_mqtt].
+

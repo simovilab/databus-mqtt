@@ -1,11 +1,11 @@
 services:
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: databus-rabbitmq
+    container_name: databus-mqtt-rabbitmq
     ports:
-      - "5672:5672"    # AMQP port
-      - "1883:1883"    # MQTT port
-      - "15672:15672"  # Management UI
+      - "5672:5672" # AMQP port
+      - "1883:1883" # MQTT port
+      - "15672:15672" # Management UI
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-admin}
@@ -14,7 +14,7 @@ services:
       - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
       - rabbitmq_data:/var/lib/rabbitmq
     networks:
-      - databus-network
+      - databus-mqtt-network
     healthcheck:
       test: rabbitmq-diagnostics -q ping
       interval: 30s
@@ -23,14 +23,14 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: databus-redis
+    container_name: databus-mqtt-redis
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
     networks:
-      - databus-network
+      - databus-mqtt-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -41,7 +41,7 @@ services:
     build:
       context: ./subscriber
       dockerfile: Dockerfile
-    container_name: databus-subscriber
+    container_name: databus-mqtt-subscriber
     environment:
       MQTT_HOST: rabbitmq
       MQTT_PORT: 1883
@@ -57,7 +57,7 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - databus-network
+      - databus-mqtt-network
     restart: unless-stopped
 
 volumes:
@@ -65,5 +65,5 @@ volumes:
   redis_data:
 
 networks:
-  databus-network:
+  databus-mqtt-network:
     driver: bridge
