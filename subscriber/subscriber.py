@@ -79,25 +79,17 @@ def on_message(client, userdata, msg):
         data['_timestamp'] = datetime.utcnow().isoformat()
         data['_topic'] = topic
         
-        # Store in Redis with topic-based key
         # Extract vehicle ID or use timestamp for unique key
         vehicle_id = data.get('vehicle_id', data.get('id', f"unknown_{int(time.time() * 1000)}"))
-        redis_key = f"vehicle:{vehicle_id}"
+        stream_key = f"vehicle:{vehicle_id}:stream"
         
-        # Store the latest data for this vehicle
-        redis_client.setex(
-            redis_key,
-            3600,  # TTL: 1 hour
-            json.dumps(data)
-        )
+        # Add to Redis Stream
+        redis_client.xadd(stream_key, data)
         
-        # Also add to a sorted set for time-based queries
-        redis_client.zadd(
-            "vehicles:timeline",
-            {redis_key: time.time()}
-        )
+        # Set TTL on the stream (1 hour)
+        redis_client.expire(stream_key, 3600)
         
-        logger.info(f"Stored vehicle data in Redis: {redis_key}")
+        logger.info(f"Added vehicle data to Redis Stream: {stream_key}")
         
     except Exception as e:
         logger.error(f"Error processing message: {e}", exc_info=True)
