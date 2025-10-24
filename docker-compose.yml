@@ -1,6 +1,6 @@
 services:
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:management
     container_name: databus-mqtt-rabbitmq
     ports:
       - "5672:5672" # AMQP port
