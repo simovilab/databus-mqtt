@@ -24,8 +24,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: databus-mqtt-redis
-    ports:
-      - "6379:6379"
+    # Port not exposed to host - access via Docker network only
+    # Prevents conflicts with other Redis instances on the host
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
