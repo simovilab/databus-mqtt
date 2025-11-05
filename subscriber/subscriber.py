@@ -2,8 +2,11 @@ import os
 import json
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from queue import Queue
+from threading import Thread
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import CallbackAPIVersion
 import redis
 
 # Configure logging
@@ -26,6 +29,9 @@ REDIS_DB = int(os.getenv('REDIS_DB', 0))
 
 # Redis connection
 redis_client = None
+
+# Message queue for async processing
+message_queue = Queue()
 
 def connect_redis():
     """Connect to Redis with retry logic"""
@@ -52,7 +58,7 @@ def connect_redis():
     logger.error("Failed to connect to Redis after maximum retries")
     return False
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, rc, properties=None):
     """Callback for when the client connects to the broker"""
     if rc == 0:
         logger.info(f"Connected to MQTT broker at {MQTT_HOST}:{MQTT_PORT}")
@@ -63,38 +69,50 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     """Callback for when a message is received from the broker"""
-    try:
-        topic = msg.topic
-        payload = msg.payload.decode('utf-8')
-        
-        logger.info(f"Received message on topic '{topic}': {payload[:100]}...")
-        
-        # Parse JSON payload if applicable
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            data = {"raw": payload}
-        
-        # Add metadata
-        data['_timestamp'] = datetime.utcnow().isoformat()
-        data['_topic'] = topic
-        
-        # Extract vehicle ID or use timestamp for unique key
-        vehicle_id = data.get('vehicle_id', data.get('id', f"unknown_{int(time.time() * 1000)}"))
-        stream_key = f"vehicle:{vehicle_id}:stream"
-        
-        # Add to Redis Stream
-        redis_client.xadd(stream_key, data)
-        
-        # Set TTL on the stream (1 hour)
-        redis_client.expire(stream_key, 3600)
-        
-        logger.info(f"Added vehicle data to Redis Stream: {stream_key}")
-        
-    except Exception as e:
-        logger.error(f"Error processing message: {e}", exc_info=True)
+    # Queue the message for processing in a separate thread
+    message_queue.put(msg)
 
-def on_disconnect(client, userdata, rc):
+def process_messages():
+    """Process messages from the queue in a separate thread"""
+    while True:
+        try:
+            msg = message_queue.get()
+            if msg is None:  # Shutdown signal
+                break
+            
+            topic = msg.topic
+            payload = msg.payload.decode('utf-8')
+            
+            logger.info(f"Received message on topic '{topic}': {payload[:100]}...")
+            
+            # Parse JSON payload if applicable
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                data = {"raw": payload}
+            
+            # Add metadata
+            data['_timestamp'] = datetime.now(timezone.utc).isoformat()
+            data['_topic'] = topic
+            
+            # Extract vehicle ID or use timestamp for unique key
+            vehicle_id = data.get('vehicle_id', data.get('id', f"unknown_{int(time.time() * 1000)}"))
+            stream_key = f"vehicle:{vehicle_id}:stream"
+            
+            # Add to Redis Stream
+            redis_client.xadd(stream_key, data)
+            
+            # Set TTL on the stream (1 hour)
+            redis_client.expire(stream_key, 3600)
+            
+            logger.info(f"Added vehicle data to Redis Stream: {stream_key}")
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+        finally:
+            message_queue.task_done()
+
+def on_disconnect(client, userdata, flags, rc, properties=None):
     """Callback for when the client disconnects from the broker"""
     if rc != 0:
         logger.warning(f"Unexpected disconnection from MQTT broker, return code: {rc}")
@@ -110,9 +128,20 @@ def main():
         logger.error("Cannot start without Redis connection")
         return
     
-    # Create MQTT client
-    client = mqtt.Client(client_id="databus-subscriber")
+    # Start message processing thread
+    processor_thread = Thread(target=process_messages, daemon=True)
+    processor_thread.start()
+    logger.info("Started message processing thread")
+    
+    # Create MQTT client with callback API v2
+    client = mqtt.Client(
+        callback_api_version=CallbackAPIVersion.VERSION2,
+        client_id="databus-subscriber"
+    )
     client.username_pw_set(MQTT_USER, MQTT_PASS)
+    
+    # Enable automatic reconnection
+    client.reconnect_delay_set(min_delay=1, max_delay=120)
     
     # Set callbacks
     client.on_connect = on_connect
@@ -126,7 +155,8 @@ def main():
     for attempt in range(max_retries):
         try:
             logger.info(f"Attempting to connect to MQTT broker (attempt {attempt + 1}/{max_retries})...")
-            client.connect(MQTT_HOST, MQTT_PORT, 60)
+            # Increase keepalive to 120 seconds to prevent premature disconnects
+            client.connect(MQTT_HOST, MQTT_PORT, keepalive=120)
             break
         except Exception as e:
             logger.warning(f"MQTT connection attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -144,6 +174,9 @@ def main():
         logger.info("Received shutdown signal")
     finally:
         client.disconnect()
+        # Stop the processing thread
+        message_queue.put(None)
+        processor_thread.join(timeout=5)
         logger.info("Subscriber service stopped")
 
 if __name__ == "__main__":
