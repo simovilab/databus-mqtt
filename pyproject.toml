@@ -8,3 +8,11 @@ dependencies = [
     "paho-mqtt>=2.1.0",
     "redis>=7.0.0",
 ]
+
+[project.optional-dependencies]
+dev = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.3",
+]

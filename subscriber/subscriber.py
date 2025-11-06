@@ -11,21 +11,20 @@ import redis
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
-MQTT_HOST = os.getenv('MQTT_HOST', 'localhost')
-MQTT_PORT = int(os.getenv('MQTT_PORT', 1883))
-MQTT_USER = os.getenv('MQTT_USER', 'admin')
-MQTT_PASS = os.getenv('MQTT_PASS', 'admin')
-MQTT_TOPIC = os.getenv('MQTT_TOPIC', 'transit/vehicles/#')
+MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_USER = os.getenv("MQTT_USER", "admin")
+MQTT_PASS = os.getenv("MQTT_PASS", "admin")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "transit/vehicles/#")
 
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-REDIS_DB = int(os.getenv('REDIS_DB', 0))
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
 # Redis connection
 redis_client = None
@@ -33,30 +32,31 @@ redis_client = None
 # Message queue for async processing
 message_queue = Queue()
 
+
 def connect_redis():
     """Connect to Redis with retry logic"""
     global redis_client
     max_retries = 5
     retry_delay = 5
-    
+
     for attempt in range(max_retries):
         try:
             redis_client = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                decode_responses=True
+                host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
             )
             redis_client.ping()
             logger.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
             return True
         except redis.ConnectionError as e:
-            logger.warning(f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            logger.warning(
+                f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}"
+            )
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
-    
+
     logger.error("Failed to connect to Redis after maximum retries")
     return False
+
 
 def on_connect(client, userdata, flags, rc, properties=None):
     """Callback for when the client connects to the broker"""
@@ -67,10 +67,12 @@ def on_connect(client, userdata, flags, rc, properties=None):
     else:
         logger.error(f"Failed to connect to MQTT broker, return code: {rc}")
 
+
 def on_message(client, userdata, msg):
     """Callback for when a message is received from the broker"""
     # Queue the message for processing in a separate thread
     message_queue.put(msg)
+
 
 def process_messages():
     """Process messages from the queue in a separate thread"""
@@ -79,38 +81,41 @@ def process_messages():
             msg = message_queue.get()
             if msg is None:  # Shutdown signal
                 break
-            
+
             topic = msg.topic
-            payload = msg.payload.decode('utf-8')
-            
+            payload = msg.payload.decode("utf-8")
+
             logger.info(f"Received message on topic '{topic}': {payload[:100]}...")
-            
+
             # Parse JSON payload if applicable
             try:
                 data = json.loads(payload)
             except json.JSONDecodeError:
                 data = {"raw": payload}
-            
+
             # Add metadata
-            data['_timestamp'] = datetime.now(timezone.utc).isoformat()
-            data['_topic'] = topic
-            
+            data["_timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["_topic"] = topic  # MQTT topic
+
             # Extract vehicle ID or use timestamp for unique key
-            vehicle_id = data.get('vehicle_id', data.get('id', f"unknown_{int(time.time() * 1000)}"))
+            vehicle_id = data.get(
+                "vehicle_id", data.get("id", f"unknown_{int(time.time() * 1000)}")
+            )
             stream_key = f"vehicle:{vehicle_id}:stream"
-            
+
             # Add to Redis Stream
             redis_client.xadd(stream_key, data)
-            
+
             # Set TTL on the stream (1 hour)
             redis_client.expire(stream_key, 3600)
-            
+
             logger.info(f"Added vehicle data to Redis Stream: {stream_key}")
-            
+
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
         finally:
             message_queue.task_done()
+
 
 def on_disconnect(client, userdata, flags, rc, properties=None):
     """Callback for when the client disconnects from the broker"""
@@ -119,53 +124,57 @@ def on_disconnect(client, userdata, flags, rc, properties=None):
     else:
         logger.info("Disconnected from MQTT broker")
 
+
 def main():
     """Main function to start the subscriber"""
     logger.info("Starting MQTT subscriber service...")
-    
+
     # Connect to Redis
     if not connect_redis():
         logger.error("Cannot start without Redis connection")
         return
-    
+
     # Start message processing thread
     processor_thread = Thread(target=process_messages, daemon=True)
     processor_thread.start()
     logger.info("Started message processing thread")
-    
+
     # Create MQTT client with callback API v2
     client = mqtt.Client(
-        callback_api_version=CallbackAPIVersion.VERSION2,
-        client_id="databus-subscriber"
+        callback_api_version=CallbackAPIVersion.VERSION2, client_id="databus-subscriber"
     )
     client.username_pw_set(MQTT_USER, MQTT_PASS)
-    
+
     # Enable automatic reconnection
     client.reconnect_delay_set(min_delay=1, max_delay=120)
-    
+
     # Set callbacks
     client.on_connect = on_connect
     client.on_message = on_message
     client.on_disconnect = on_disconnect
-    
+
     # Connect to MQTT broker with retry logic
     max_retries = 5
     retry_delay = 5
-    
+
     for attempt in range(max_retries):
         try:
-            logger.info(f"Attempting to connect to MQTT broker (attempt {attempt + 1}/{max_retries})...")
+            logger.info(
+                f"Attempting to connect to MQTT broker (attempt {attempt + 1}/{max_retries})..."
+            )
             # Increase keepalive to 120 seconds to prevent premature disconnects
             client.connect(MQTT_HOST, MQTT_PORT, keepalive=120)
             break
         except Exception as e:
-            logger.warning(f"MQTT connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            logger.warning(
+                f"MQTT connection attempt {attempt + 1}/{max_retries} failed: {e}"
+            )
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
             else:
                 logger.error("Failed to connect to MQTT broker after maximum retries")
                 return
-    
+
     # Start the loop
     try:
         logger.info("Starting MQTT client loop...")
@@ -178,6 +187,7 @@ def main():
         message_queue.put(None)
         processor_thread.join(timeout=5)
         logger.info("Subscriber service stopped")
+
 
 if __name__ == "__main__":
     main()
